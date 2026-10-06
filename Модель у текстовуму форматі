@@ -1,0 +1,130 @@
+import os
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+from sklearn.model_selection import train_test_split
+from sklearn.svm import SVC
+from sklearn.metrics import accuracy_score
+from google.colab import drive
+
+if not os.path.exists('/content/drive/MyDrive'):
+    drive.mount('/content/drive')
+
+DATASET_DIR = '/content/drive/MyDrive/ai_vs_real_dataset2025' #https://www.kaggle.com/datasets/virajinduruwa/real-vs-fakeai-image-dataset
+#REAL_DIR = os.path.join(DATASET_DIR, 'REAL') #закоментовано, бо у цьому датасеті клас реальних зображень отруєний, тобто містить ШІ зображення
+#Було використані реальні зображення з цього датасету, все одно рельні зображенння не змінюються
+REAL_DIR = os.path.join('/content/drive/MyDrive/ai_vs_real_dataset2024/Midjourney_Exp2/test', 'REAL') #	https://www.kaggle.com/datasets/mariammarioma/midjourney-imagenet-real-vs-synth 
+
+FAKE_DIR = os.path.join(DATASET_DIR, 'FAKE')
+
+def process_path_to_fft(img_path, img_size=(256, 256)):
+    pil_img = Image.open(img_path).convert('RGB')
+
+    img_gray = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2GRAY)
+    img_gray = cv2.resize(img_gray, img_size)
+
+    f_transform = np.fft.fft2(img_gray)
+    f_shift = np.fft.fftshift(f_transform)
+    magnitude_spectrum = 20 * np.log(np.abs(f_shift) + 1e-8)
+
+    return pil_img, magnitude_spectrum
+
+def extract_azimuthal_profile(magnitude_spectrum):
+    h, w = magnitude_spectrum.shape
+    center_y, center_x = h // 2, w // 2
+
+    y, x = np.indices((h, w))
+    r = np.sqrt((x - center_x)**2 + (y - center_y)**2).astype(int)
+
+    tbin = np.bincount(r.ravel(), magnitude_spectrum.ravel())
+    nr = np.bincount(r.ravel())
+    radial_profile = tbin / np.maximum(nr, 1)
+
+    max_radius = min(center_y, center_x)
+    return radial_profile[:max_radius]
+
+X, y, raw_images, spectra = [], [], [], []
+
+real_paths = [
+    os.path.join(REAL_DIR, f)
+    for f in os.listdir(REAL_DIR)
+    if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))
+]
+
+fake_paths = [
+    os.path.join(FAKE_DIR, f)
+    for f in os.listdir(FAKE_DIR)
+    if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))
+]
+
+print(f"Зчитано з Google Диску: {len(real_paths)} REAL та {len(fake_paths)} FAKE зображень.")
+print("Обробка зображень та обчислення спектрів Фур'є...")
+
+for path in real_paths:
+    pil_img, spec = process_path_to_fft(path)
+    X.append(extract_azimuthal_profile(spec))
+    y.append(1)
+    raw_images.append(pil_img)
+    spectra.append(spec)
+
+for path in fake_paths:
+    pil_img, spec = process_path_to_fft(path)
+    X.append(extract_azimuthal_profile(spec))
+    y.append(0)
+    raw_images.append(pil_img)
+    spectra.append(spec)
+
+X = np.array(X)
+y = np.array(y)
+
+X_train, X_test, y_train, y_test, raw_train, raw_test, spec_train, spec_test = train_test_split(
+    X, y, raw_images, spectra, test_size=0.2, random_state=42, stratify=y
+)
+
+print("Навчання SVM-класифікатора...")
+model = SVC(kernel='rbf', C=10.0, probability=True)
+model.fit(X_train, y_train)
+
+y_pred = model.predict(X_test)
+print(f"\nТочність (Accuracy) моделі: {accuracy_score(y_test, y_pred) * 100:.2f}%")
+
+real_idx = next(i for i, label in enumerate(y_test) if label == 1)
+ai_idx = next(i for i, label in enumerate(y_test) if label == 0)
+
+label_map = {1: "REAL (Реальне)", 0: "FAKE (Згенероване ШІ)"}
+
+print("\n--- Демонстрація перевірки ---")
+
+for title, idx in [("Реальне фото", real_idx), ("ШІ фото", ai_idx)]:
+    feat = X_test[idx].reshape(1, -1)
+    pred = model.predict(feat)[0]
+    prob = model.predict_proba(feat)[0]
+
+    print(f"\n[{title}]")
+    print(f"  Дійсний клас:       {label_map[y_test[idx]]}")
+    print(f"  Передбачення моделі: {label_map[pred]}")
+    print(f"  Впевненість:         {prob[pred] * 100:.2f}%")
+
+fig, axes = plt.subplots(2, 2, figsize=(9, 8))
+
+pred_real = model.predict(X_test[real_idx].reshape(1, -1))[0]
+axes[0, 0].imshow(raw_test[real_idx])
+axes[0, 0].set_title(f"REAL Фото (з Диску)\nПередбачено: {label_map[pred_real]}")
+axes[0, 0].axis('off')
+
+axes[0, 1].imshow(spec_test[real_idx], cmap='magma')
+axes[0, 1].set_title("Спектр Фур'є (REAL)")
+axes[0, 1].axis('off')
+
+pred_ai = model.predict(X_test[ai_idx].reshape(1, -1))[0]
+axes[1, 0].imshow(raw_test[ai_idx])
+axes[1, 0].set_title(f"FAKE Фото (з Диску)\nПередбачено: {label_map[pred_ai]}")
+axes[1, 0].axis('off')
+
+axes[1, 1].imshow(spec_test[ai_idx], cmap='magma')
+axes[1, 1].set_title("Спектр Фур'є (FAKE)")
+axes[1, 1].axis('off')
+
+plt.tight_layout()
+plt.show()
